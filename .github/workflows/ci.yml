@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - run: go test -race ./...
+      - run: go vet ./...
+
+  client:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - run: >-
+          xcodebuild
+          -project client/client.xcodeproj
+          -target client
+          -configuration Release
+          CODE_SIGNING_ALLOWED=NO
+          build
