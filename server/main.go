@@ -40,25 +40,30 @@ type proxyMessage struct {
 }
 
 type agentSession struct {
+	id       uint32
 	outbound chan proxyMessage
 	done     chan struct{}
 }
 
 type proxyConnection struct {
-	bridge      *bridge
-	session     *agentSession
-	conn        net.Conn
-	id          uint32
-	inbound     chan proxyMessage
-	done        chan struct{}
-	once        sync.Once
-	agentClosed atomic.Bool
+	bridge        *bridge
+	session       *agentSession
+	conn          net.Conn
+	id            uint32
+	inbound       chan proxyMessage
+	done          chan struct{}
+	once          sync.Once
+	agentClosed   atomic.Bool
+	opened        time.Time
+	sentBytes     atomic.Uint64
+	receivedBytes atomic.Uint64
 }
 
 type bridge struct {
-	listener net.Listener
-	port     int
-	nextID   atomic.Uint32
+	listener         net.Listener
+	port             int
+	nextConnectionID atomic.Uint32
+	nextSessionID    atomic.Uint32
 
 	mu          sync.Mutex
 	agent       *agentSession
@@ -115,6 +120,7 @@ func (b *bridge) connectAgent() (*agentSession, bool) {
 		return nil, false
 	}
 	session := &agentSession{
+		id:       b.nextSessionID.Add(1),
 		outbound: make(chan proxyMessage, 256),
 		done:     make(chan struct{}),
 	}
@@ -153,7 +159,7 @@ func (b *bridge) handleConnection(session *agentSession, conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	request, err := readSOCKSRequest(conn)
+	request, target, err := readSOCKSRequest(conn)
 	if err != nil {
 		_ = conn.Close()
 		return
@@ -166,7 +172,9 @@ func (b *bridge) handleConnection(session *agentSession, conn net.Conn) {
 		conn:    conn,
 		inbound: make(chan proxyMessage, 64),
 		done:    make(chan struct{}),
+		opened:  time.Now(),
 	}
+	connection.sentBytes.Store(uint64(len(request)))
 
 	b.mu.Lock()
 	if b.agent != session {
@@ -175,10 +183,11 @@ func (b *bridge) handleConnection(session *agentSession, conn net.Conn) {
 		return
 	}
 	for connection.id == 0 || b.connections[connection.id] != nil {
-		connection.id = b.nextID.Add(1)
+		connection.id = b.nextConnectionID.Add(1)
 	}
 	b.connections[connection.id] = connection
 	b.mu.Unlock()
+	log.Printf("conn#%d: Open (source=%q target=%q)", connection.id, conn.RemoteAddr().String(), target)
 
 	go connection.writeToLocal()
 	if !b.send(session, proxyMessage{ServerID: connection.id, Data: request, Port: b.port}) {
@@ -191,6 +200,7 @@ func (b *bridge) handleConnection(session *agentSession, conn net.Conn) {
 		n, err := conn.Read(buffer)
 		if n > 0 {
 			data := append([]byte(nil), buffer[:n]...)
+			connection.sentBytes.Add(uint64(n))
 			if !b.send(session, proxyMessage{ServerID: connection.id, Data: data, Port: b.port}) {
 				connection.close()
 				return
@@ -240,6 +250,7 @@ func (c *proxyConnection) writeToLocal() {
 	for {
 		select {
 		case message := <-c.inbound:
+			c.receivedBytes.Add(uint64(len(message.Data)))
 			if len(message.Data) > 0 {
 				_ = c.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 				if err := writeAll(c.conn, message.Data); err != nil {
@@ -270,6 +281,13 @@ func (c *proxyConnection) close() {
 			delete(c.bridge.connections, c.id)
 		}
 		c.bridge.mu.Unlock()
+		log.Printf(
+			"conn#%d: Close (sent=%dB received=%dB duration=%s)",
+			c.id,
+			c.sentBytes.Load(),
+			c.receivedBytes.Load(),
+			time.Since(c.opened),
+		)
 
 		if !c.agentClosed.Load() {
 			c.bridge.send(c.session, proxyMessage{ServerID: c.id, Exit: true, Port: c.bridge.port})
@@ -283,14 +301,20 @@ func (b *bridge) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "an agent is already connected", http.StatusConflict)
 		return
 	}
-	defer b.disconnectAgent(session)
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		b.disconnectAgent(session)
 		return
 	}
-	defer conn.Close()
 	conn.SetReadLimit(maxFrameSize)
+	opened := time.Now()
+	log.Printf("session#%d: Open (addr=%s)", session.id, r.RemoteAddr)
+	defer func() {
+		b.disconnectAgent(session)
+		_ = conn.Close()
+		log.Printf("session#%d: Close (addr=%s duration=%s)", session.id, r.RemoteAddr, time.Since(opened))
+	}()
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -384,13 +408,13 @@ func negotiateNoAuth(conn net.Conn) error {
 	return errors.New("client does not support unauthenticated SOCKS5")
 }
 
-func readSOCKSRequest(reader io.Reader) ([]byte, error) {
+func readSOCKSRequest(reader io.Reader) ([]byte, string, error) {
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(reader, header); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if header[0] != socks5Version || header[2] != 0 {
-		return nil, errors.New("invalid SOCKS5 request")
+		return nil, "", errors.New("invalid SOCKS5 request")
 	}
 
 	request := append([]byte(nil), header...)
@@ -401,21 +425,29 @@ func readSOCKSRequest(reader io.Reader) ([]byte, error) {
 	case 3:
 		var length [1]byte
 		if _, err := io.ReadFull(reader, length[:]); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		request = append(request, length[0])
 		addressSize = int(length[0])
 	case 4:
 		addressSize = 16
 	default:
-		return nil, errors.New("unsupported SOCKS5 address type")
+		return nil, "", errors.New("unsupported SOCKS5 address type")
 	}
 
 	tail := make([]byte, addressSize+2)
 	if _, err := io.ReadFull(reader, tail); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return append(request, tail...), nil
+	var host string
+	switch header[3] {
+	case 1, 4:
+		host = net.IP(tail[:addressSize]).String()
+	case 3:
+		host = string(tail[:addressSize])
+	}
+	port := int(tail[addressSize])<<8 | int(tail[addressSize+1])
+	return append(request, tail...), net.JoinHostPort(host, fmt.Sprint(port)), nil
 }
 
 func writeAll(writer io.Writer, data []byte) error {

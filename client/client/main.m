@@ -32,7 +32,7 @@ int main(int argc, const char *argv[]) {
     NSString *scheme = url.scheme.lowercaseString;
     if (!url.host.length ||
         !([scheme isEqualToString:@"ws"] || [scheme isEqualToString:@"wss"])) {
-      NSLog(@"Invalid WebSocket URL: %@", argument ?: @"(invalid UTF-8)");
+      NSLog(@"Invalid WebSocket URL");
       return 1;
     }
 
@@ -42,6 +42,14 @@ int main(int argc, const char *argv[]) {
     InitSocks();
 
     WebSocketClient *client = [[WebSocketClient alloc] initWithURL:url];
+    NSDate *connectionStarted = [NSDate date];
+    NSURLComponents *displayURL = [NSURLComponents componentsWithURL:url
+                                             resolvingAgainstBaseURL:NO];
+    displayURL.user = nil;
+    displayURL.password = nil;
+    displayURL.query = nil;
+    displayURL.fragment = nil;
+    NSLog(@"Connecting to %@", displayURL.string);
     [client connect];
 
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5.0];
@@ -54,6 +62,8 @@ int main(int argc, const char *argv[]) {
       [client disconnect];
       return 1;
     }
+    NSLog(@"Connected (latency %.1f ms)",
+          [[NSDate date] timeIntervalSinceDate:connectionStarted] * 1000.0);
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
       while (!ShouldExit()) {
@@ -104,8 +114,6 @@ int main(int argc, const char *argv[]) {
             RequestExit();
             break;
           }
-          NSLog(@"Sent(batch): %lu item(s), %lu bytes",
-                (unsigned long)responses.count, (unsigned long)data.length);
         }
       }
     });
@@ -116,6 +124,7 @@ int main(int argc, const char *argv[]) {
           runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
     }
     [client disconnect];
+    NSLog(@"Disconnected");
   }
   return 0;
 }

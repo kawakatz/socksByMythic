@@ -226,7 +226,6 @@ static void writeToProxy(NSNumber *serverId, NSData *data) {
 }
 
 static void readFromProxy(NSNumber *serverId) {
-  NSLog(@"readFromProxy(): start server_id=%@", serverId);
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
     __block NSInputStream *in = nil;
     dispatch_sync(socketsQueue, ^{

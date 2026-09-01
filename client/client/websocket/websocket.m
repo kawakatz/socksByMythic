@@ -2,6 +2,11 @@
 
 static const int64_t kSendTimeout = 10 * NSEC_PER_SEC;
 
+static void LogWebSocketError(NSString *operation, NSError *error) {
+  NSLog(@"WebSocket %@ error: %@ (%ld)", operation, error.domain,
+        (long)error.code);
+}
+
 @interface WebSocketClient () <NSURLSessionWebSocketDelegate>
 @property(nonatomic, strong) NSURL *url;
 @property(nonatomic, strong) NSURLSession *session;
@@ -67,7 +72,7 @@ static const int64_t kSendTimeout = 10 * NSEC_PER_SEC;
     return NO;
   }
   if (sendError) {
-    NSLog(@"WebSocket send error: %@", sendError);
+    LogWebSocketError(@"send", sendError);
     [self finish];
     return NO;
   }
@@ -96,7 +101,10 @@ static const int64_t kSendTimeout = 10 * NSEC_PER_SEC;
           return;
         }
         if (error) {
-          NSLog(@"WebSocket receive error: %@", error);
+          if (!([error.domain isEqualToString:NSURLErrorDomain] &&
+                error.code == NSURLErrorCancelled)) {
+            LogWebSocketError(@"receive", error);
+          }
           [self finish];
           return;
         }
