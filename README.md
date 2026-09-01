@@ -13,8 +13,7 @@
   <a href="#references">References</a>
 </p>
 
-socksByMythic is a Mythic-inspired alternative to Chisel for red-team use. It provides a reverse SOCKS5 proxy over WebSockets.  
-You can write your own clients.
+socksByMythic is a Mythic-inspired alternative to Chisel for red-team use. It provides a reverse SOCKS5 proxy over WebSockets. You can write your own clients.
 
 The proxy message format and behavior are derived from BSD-licensed Mythic and Poseidon code.  
 This project is not affiliated with or endorsed by Mythic, Poseidon, or their copyright holders. See [NOTICE.md](NOTICE.md) for details.<br><br>
